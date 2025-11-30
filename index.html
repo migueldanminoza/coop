@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="UTF-8">
-    <title>MQTT DHT11 Live Monitor</title>
+    <title>DHT11 MQTT Dashboard (Mosquitto)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <style>
@@ -92,61 +92,38 @@
         small {
             color: #666;
         }
-
-        .status-ok {
-            color: #2e7d32;
-        }
-
-        .status-warn {
-            color: #e65100;
-        }
-
-        .status-error {
-            color: #b71c1c;
-        }
     </style>
 
-    <!-- Chart.js + time adapter -->
+    <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
-
-    <!-- mqtt.js (browser bundle) -->
+    <!-- mqtt.js -->
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 </head>
 
 <body>
-    <!-- (C) MIN–MAX STATS TABLE -->
+
+    <!-- MIN–MAX STATS TABLE -->
     <div class="card">
-        <h1>MQTT DHT11 Live Monitor</h1>
+        <h1>DHT11 MQTT Dashboard (Mosquitto)</h1>
         <h2>Stats for selected time span</h2>
         <table>
             <thead>
                 <tr>
                     <th>Metric</th>
-                    <th>Value</th>
-                    <th>Time</th>
+                    <th>Min</th>
+                    <th>Max</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td>Min Temp (<span id="statsTempUnit">°C</span>)</td>
+                    <td>Temp (<span id="statsTempUnit">°C</span>)</td>
                     <td id="minTemp">--</td>
-                    <td id="minTempTime">--</td>
-                </tr>
-                <tr>
-                    <td>Max Temp (<span id="statsTempUnit2">°C</span>)</td>
                     <td id="maxTemp">--</td>
-                    <td id="maxTempTime">--</td>
                 </tr>
                 <tr>
-                    <td>Min Humidity (%)</td>
+                    <td>Humidity (%)</td>
                     <td id="minHum">--</td>
-                    <td id="minHumTime">--</td>
-                </tr>
-                <tr>
-                    <td>Max Humidity (%)</td>
                     <td id="maxHum">--</td>
-                    <td id="maxHumTime">--</td>
                 </tr>
             </tbody>
         </table>
@@ -157,20 +134,11 @@
     <div class="card">
         <h2>Current values & controls</h2>
         <div id="values">
-            <div>
-                <strong>Temperature: </strong>
-                <span id="currentTemp">--</span>
-                <span id="currentTempUnit">°C</span>
+            <div><strong>Temperature: </strong><span id="currentTemp">--</span> <span id="currentTempUnit">°C</span>
             </div>
             <div><strong>Humidity: </strong><span id="currentHum">--</span> %</div>
-            <div>
-                <strong>MQTT status: </strong>
-                <span id="status" class="status-error">Not connected</span>
-            </div>
-            <div>
-                <strong>Last message: </strong>
-                <span id="lastMsgTime">--</span>
-            </div>
+            <div><strong>Status: </strong><span id="status">Connecting...</span></div>
+            <div><strong>MQTT Topic: </strong><code id="topicLabel"></code></div>
         </div>
 
         <div id="controls">
@@ -193,8 +161,8 @@
             </div>
 
             <small>
-                Time span applies to both charts and stats. Data is kept in memory for the last 24 hours while this page
-                is open.
+                Time span = now minus selection (live data only, no broker history).
+                All charts and stats use the selected span.
             </small>
         </div>
     </div>
@@ -212,342 +180,254 @@
     </div>
 
     <script>
-        window.addEventListener("load", function () {
-            // ================== MQTT CONFIG ==================
-            // Fill these with your HiveMQ Cloud details.
-            const MQTT_CONFIG = {
-                host: "YOUR-CLUSTER-ID.s2.eu.hivemq.cloud", // e.g. "xxxxxx.s2.eu.hivemq.cloud"
-                port: 8884,                                  // typical TLS WebSocket port for HiveMQ Cloud
-                path: "/mqtt",                               // usually "/mqtt" for HiveMQ Cloud
-                username: "YOUR_USERNAME",
-                password: "YOUR_PASSWORD",
-                topic: "sensors/dht11/yourtopic"             // topic your ESP publishes to
-            };
+        // ------------------- CONFIG ---------------------
+        const MQTT_URL = "wss://test.mosquitto.org:8081"; // secure WebSocket
+        const MQTT_TOPIC = "6d3647b111db22048d788f62b455eac1da5d3da9561cb8b7772959438eabbec3/data";       // MUST match ESP sketch
 
-            // ================== UI + STATE ==================
-            const SPAN_OPTIONS = {
-                "5m": 5 * 60 * 1000,
-                "15m": 15 * 60 * 1000,
-                "30m": 30 * 60 * 1000,
-                "1h": 1 * 60 * 60 * 1000,
-                "3h": 3 * 60 * 60 * 1000,
-                "6h": 6 * 60 * 60 * 1000,
-                "12h": 12 * 60 * 60 * 1000,
-                "24h": 24 * 60 * 60 * 1000
-            };
+        document.getElementById("topicLabel").textContent = MQTT_TOPIC;
 
-            let currentSpanKey = "5m";
-            let currentTempUnit = "C"; // "C" or "F"
+        // Time spans in ms
+        const SPAN_OPTIONS = {
+            "5m": 5 * 60 * 1000,
+            "15m": 15 * 60 * 1000,
+            "30m": 30 * 60 * 1000,
+            "1h": 1 * 60 * 60 * 1000,
+            "3h": 3 * 60 * 60 * 1000,
+            "6h": 6 * 60 * 60 * 1000,
+            "12h": 12 * 60 * 60 * 1000,
+            "24h": 24 * 60 * 60 * 1000
+        };
 
-            const samples = []; // { time: Date, tempC, tempF, hum }
+        let currentSpanKey = "5m";
+        let currentTempUnit = "C"; // "C" or "F"
+        const samples = [];  // { time: Date, tempC, tempF, hum }
 
-            // DOM elements
-            const statusSpan = document.getElementById("status");
-            const lastMsgTimeSpan = document.getElementById("lastMsgTime");
-            const currentTempSpan = document.getElementById("currentTemp");
-            const currentTempUnitSpan = document.getElementById("currentTempUnit");
-            const currentHumSpan = document.getElementById("currentHum");
+        // ------------------- DOM REFS -------------------
+        const statusSpan = document.getElementById("status");
+        const currentTempSpan = document.getElementById("currentTemp");
+        const currentTempUnitSpan = document.getElementById("currentTempUnit");
+        const currentHumSpan = document.getElementById("currentHum");
 
-            const statsTempUnitSpan = document.getElementById("statsTempUnit");
-            const statsTempUnitSpan2 = document.getElementById("statsTempUnit2");
-            const minTempSpan = document.getElementById("minTemp");
-            const maxTempSpan = document.getElementById("maxTemp");
-            const minHumSpan = document.getElementById("minHum");
-            const maxHumSpan = document.getElementById("maxHum");
-            const minTempTimeSpan = document.getElementById("minTempTime");
-            const maxTempTimeSpan = document.getElementById("maxTempTime");
-            const minHumTimeSpan = document.getElementById("minHumTime");
-            const maxHumTimeSpan = document.getElementById("maxHumTime");
-            const statsInfoSpan = document.getElementById("statsInfo");
-            const graphTempUnitSpan = document.getElementById("graphTempUnit");
+        const statsTempUnitSpan = document.getElementById("statsTempUnit");
+        const minTempSpan = document.getElementById("minTemp");
+        const maxTempSpan = document.getElementById("maxTemp");
+        const minHumSpan = document.getElementById("minHum");
+        const maxHumSpan = document.getElementById("maxHum");
+        const statsInfoSpan = document.getElementById("statsInfo");
 
-            const btnC = document.getElementById("btnC");
-            const btnF = document.getElementById("btnF");
-            const spanButtons = document.querySelectorAll(".span-btn");
+        const graphTempUnitSpan = document.getElementById("graphTempUnit");
 
-            const tempCtx = document.getElementById("tempChart").getContext("2d");
-            const humCtx = document.getElementById("humChart").getContext("2d");
+        const btnC = document.getElementById("btnC");
+        const btnF = document.getElementById("btnF");
+        const spanButtons = document.querySelectorAll(".span-btn");
 
-            // ================== CHARTS ==================
-            const commonOptions = {
-                animation: false,
-                responsive: true,
-                parsing: false, // we supply {x,y}
-                scales: {
-                    x: {
-                        type: "time",
-                        time: {
-                            unit: "minute"
-                        },
-                        ticks: {
-                            maxTicksLimit: 10
-                        },
-                        title: { display: true, text: "Time" }
-                    },
-                    y: {
-                        beginAtZero: false
-                    }
+        const tempCtx = document.getElementById("tempChart").getContext("2d");
+        const humCtx = document.getElementById("humChart").getContext("2d");
+
+        const commonOptions = {
+            animation: false,
+            responsive: true,
+            scales: {
+                x: {
+                    title: { display: true, text: "Time" },
+                    ticks: { maxTicksLimit: 10 }
                 },
-                plugins: {
-                    legend: { display: false }
+                y: {
+                    beginAtZero: false
                 }
-            };
+            },
+            plugins: {
+                legend: { display: false }
+            }
+        };
 
-            const tempChart = new Chart(tempCtx, {
-                type: "line",
-                data: {
-                    datasets: [{
-                        label: "Temperature",
-                        data: [],
-                        borderWidth: 2,
-                        fill: false
-                    }]
-                },
-                options: JSON.parse(JSON.stringify(commonOptions))
-            });
+        const tempChart = new Chart(tempCtx, {
+            type: "line",
+            data: { labels: [], datasets: [{ label: "Temperature", data: [], borderWidth: 2, fill: false }] },
+            options: commonOptions
+        });
 
-            const humChart = new Chart(humCtx, {
-                type: "line",
-                data: {
-                    datasets: [{
-                        label: "Humidity",
-                        data: [],
-                        borderWidth: 2,
-                        fill: false
-                    }]
-                },
-                options: JSON.parse(JSON.stringify(commonOptions))
-            });
+        const humChart = new Chart(humCtx, {
+            type: "line",
+            data: { labels: [], datasets: [{ label: "Humidity", data: [], borderWidth: 2, fill: false }] },
+            options: commonOptions
+        });
 
-            // ================== HELPERS ==================
-            function formatTime(d) {
-                const h = d.getHours().toString().padStart(2, "0");
-                const m = d.getMinutes().toString().padStart(2, "0");
-                const s = d.getSeconds().toString().padStart(2, "0");
-                return `${h}:${m}:${s}`;
+        // ------------------- HELPERS --------------------
+        function formatTime(d) {
+            const h = d.getHours().toString().padStart(2, "0");
+            const m = d.getMinutes().toString().padStart(2, "0");
+            return `${h}:${m}`;
+        }
+
+        function getFilteredSamples() {
+            const now = new Date();
+            const spanMs = SPAN_OPTIONS[currentSpanKey];
+            const cutoff = new Date(now.getTime() - spanMs);
+
+            // Also prune old samples beyond 24h to avoid memory creep
+            const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            for (let i = samples.length - 1; i >= 0; i--) {
+                if (samples[i].time < dayAgo) {
+                    samples.splice(i, 1);
+                }
             }
 
-            function getFilteredSamples() {
-                const now = new Date();
-                const spanMs = SPAN_OPTIONS[currentSpanKey];
-                const spanStart = new Date(now.getTime() - spanMs);
+            return samples.filter(s => s.time >= cutoff);
+        }
 
-                // Only keep last 24h in memory
-                const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-                for (let i = samples.length - 1; i >= 0; i--) {
-                    if (samples[i].time < twentyFourHoursAgo) {
-                        samples.splice(i, 1);
-                    }
-                }
+        function updateStatsAndCharts() {
+            const filtered = getFilteredSamples();
 
-                return samples.filter(s => s.time >= spanStart);
-            }
+            if (filtered.length === 0) {
+                minTempSpan.textContent = "--";
+                maxTempSpan.textContent = "--";
+                minHumSpan.textContent = "--";
+                maxHumSpan.textContent = "--";
+                statsInfoSpan.textContent = "No data for selected span yet.";
 
-            function updateStatsAndCharts() {
-                const filtered = getFilteredSamples();
-
-                if (filtered.length === 0) {
-                    minTempSpan.textContent = "--";
-                    maxTempSpan.textContent = "--";
-                    minHumSpan.textContent = "--";
-                    maxHumSpan.textContent = "--";
-                    minTempTimeSpan.textContent = "--";
-                    maxTempTimeSpan.textContent = "--";
-                    minHumTimeSpan.textContent = "--";
-                    maxHumTimeSpan.textContent = "--";
-                    statsInfoSpan.textContent = "No data for selected span yet.";
-
-                    tempChart.data.datasets[0].data = [];
-                    humChart.data.datasets[0].data = [];
-                    tempChart.update();
-                    humChart.update();
-                    return;
-                }
-
-                const temps = filtered.map(s => currentTempUnit === "C" ? s.tempC : s.tempF);
-                const hums = filtered.map(s => s.hum);
-
-                const minTemp = Math.min(...temps);
-                const maxTemp = Math.max(...temps);
-                const minHum = Math.min(...hums);
-                const maxHum = Math.max(...hums);
-
-                const minTempIndex = temps.indexOf(minTemp);
-                const maxTempIndex = temps.indexOf(maxTemp);
-                const minHumIndex = hums.indexOf(minHum);
-                const maxHumIndex = hums.indexOf(maxHum);
-
-                const minTempTime = filtered[minTempIndex].time;
-                const maxTempTime = filtered[maxTempIndex].time;
-                const minHumTime = filtered[minHumIndex].time;
-                const maxHumTime = filtered[maxHumIndex].time;
-
-                minTempSpan.textContent = minTemp.toFixed(2);
-                maxTempSpan.textContent = maxTemp.toFixed(2);
-                minHumSpan.textContent = minHum.toFixed(2);
-                maxHumSpan.textContent = maxHum.toFixed(2);
-
-                minTempTimeSpan.textContent = formatTime(minTempTime);
-                maxTempTimeSpan.textContent = formatTime(maxTempTime);
-                minHumTimeSpan.textContent = formatTime(minHumTime);
-                maxHumTimeSpan.textContent = formatTime(maxHumTime);
-
-                const unitLabel = currentTempUnit === "C" ? "°C" : "°F";
-                statsTempUnitSpan.textContent = unitLabel;
-                statsTempUnitSpan2.textContent = unitLabel;
-
-                const now = new Date();
-                const spanMs = SPAN_OPTIONS[currentSpanKey];
-                const minTime = new Date(now.getTime() - spanMs);
-
-                const earliest = filtered[0].time;
-                const spanLabel = `${formatTime(earliest)} → ${formatTime(now)}`;
-                statsInfoSpan.textContent = `Showing ${filtered.length} samples from ${spanLabel}.`;
-
-                const tempPoints = filtered.map(s => ({
-                    x: s.time,
-                    y: currentTempUnit === "C" ? s.tempC : s.tempF
-                }));
-                const humPoints = filtered.map(s => ({
-                    x: s.time,
-                    y: s.hum
-                }));
-
-                tempChart.data.datasets[0].data = tempPoints;
-                humChart.data.datasets[0].data = humPoints;
-
-                tempChart.options.scales.x.min = minTime;
-                tempChart.options.scales.x.max = now;
-                humChart.options.scales.x.min = minTime;
-                humChart.options.scales.x.max = now;
-
+                tempChart.data.labels = [];
+                tempChart.data.datasets[0].data = [];
                 tempChart.update("none");
+
+                humChart.data.labels = [];
+                humChart.data.datasets[0].data = [];
                 humChart.update("none");
+                return;
             }
 
-            function setTempUnit(unit) {
-                currentTempUnit = unit;
-                const label = unit === "C" ? "°C" : "°F";
-                graphTempUnitSpan.textContent = label;
-                currentTempUnitSpan.textContent = label;
+            const temps = filtered.map(s => currentTempUnit === "C" ? s.tempC : s.tempF);
+            const hums = filtered.map(s => s.hum);
 
-                if (unit === "C") {
-                    btnC.classList.add("active");
-                    btnF.classList.remove("active");
+            const minTemp = Math.min(...temps);
+            const maxTemp = Math.max(...temps);
+            const minHum = Math.min(...hums);
+            const maxHum = Math.max(...hums);
+
+            minTempSpan.textContent = minTemp.toFixed(2);
+            maxTempSpan.textContent = maxTemp.toFixed(2);
+            minHumSpan.textContent = minHum.toFixed(2);
+            maxHumSpan.textContent = maxHum.toFixed(2);
+
+            statsTempUnitSpan.textContent = currentTempUnit === "C" ? "°C" : "°F";
+
+            const now = new Date();
+            const earliest = filtered[0].time;
+            const spanLabel = `${formatTime(earliest)} → ${formatTime(now)}`;
+            statsInfoSpan.textContent = `Showing ${filtered.length} samples from ${spanLabel}.`;
+
+            // Update charts
+            const labels = filtered.map(s => formatTime(s.time));
+            tempChart.data.labels = labels;
+            tempChart.data.datasets[0].data = temps;
+            tempChart.update("none");
+
+            humChart.data.labels = labels;
+            humChart.data.datasets[0].data = hums;
+            humChart.update("none");
+        }
+
+        function setTempUnit(unit) {
+            currentTempUnit = unit;
+            graphTempUnitSpan.textContent = unit === "C" ? "°C" : "°F";
+            currentTempUnitSpan.textContent = unit === "C" ? "°C" : "°F";
+
+            if (unit === "C") {
+                btnC.classList.add("active");
+                btnF.classList.remove("active");
+            } else {
+                btnF.classList.add("active");
+                btnC.classList.remove("active");
+            }
+
+            updateStatsAndCharts();
+        }
+
+        function setSpan(key) {
+            currentSpanKey = key;
+            spanButtons.forEach(btn => {
+                if (btn.dataset.span === key) {
+                    btn.classList.add("active");
                 } else {
-                    btnF.classList.add("active");
-                    btnC.classList.remove("active");
+                    btn.classList.remove("active");
                 }
+            });
+            updateStatsAndCharts();
+        }
 
-                updateStatsAndCharts();
-            }
+        // ------------------- EVENTS ---------------------
+        btnC.addEventListener("click", () => setTempUnit("C"));
+        btnF.addEventListener("click", () => setTempUnit("F"));
 
-            function setSpan(key) {
-                currentSpanKey = key;
-                spanButtons.forEach(btn => {
-                    if (btn.dataset.span === key) {
-                        btn.classList.add("active");
-                    } else {
-                        btn.classList.remove("active");
-                    }
-                });
-                updateStatsAndCharts();
-            }
+        spanButtons.forEach(btn => {
+            btn.addEventListener("click", () => {
+                const key = btn.dataset.span;
+                setSpan(key);
+            });
+        });
 
-            // ================== MQTT CONNECTION ==================
-            function setStatus(text, cssClass) {
-                statusSpan.textContent = text;
-                statusSpan.className = cssClass;
-            }
+        // ------------------- MQTT CLIENT ----------------
+        let client;
 
-            const clientId = "webclient-" + Math.random().toString(16).substr(2, 8);
-            const connectUrl = `wss://${MQTT_CONFIG.host}:${MQTT_CONFIG.port}${MQTT_CONFIG.path}`;
+        function connectMqtt() {
+            statusSpan.textContent = "Connecting to " + MQTT_URL + " ...";
 
-            setStatus("Connecting...", "status-warn");
-
-            const client = mqtt.connect(connectUrl, {
-                clientId: clientId,
-                username: MQTT_CONFIG.username,
-                password: MQTT_CONFIG.password,
-                clean: true,
-                reconnectPeriod: 5000, // ms
-                connectTimeout: 10 * 1000
+            client = mqtt.connect(MQTT_URL, {
+                clean: true
             });
 
             client.on("connect", () => {
-                setStatus("Connected", "status-ok");
-                console.log("MQTT connected as", clientId);
-
-                client.subscribe(MQTT_CONFIG.topic, (err) => {
+                statusSpan.textContent = "Connected";
+                client.subscribe(MQTT_TOPIC, err => {
                     if (err) {
-                        console.error("Subscribe error:", err);
-                        setStatus("Connected, subscribe failed", "status-warn");
+                        statusSpan.textContent = "Subscribed failed: " + err.message;
                     } else {
-                        console.log("Subscribed to", MQTT_CONFIG.topic);
+                        statusSpan.textContent = "Connected (subscribed)";
                     }
                 });
             });
 
             client.on("reconnect", () => {
-                setStatus("Reconnecting...", "status-warn");
-            });
-
-            client.on("close", () => {
-                setStatus("Disconnected", "status-error");
+                statusSpan.textContent = "Reconnecting...";
             });
 
             client.on("error", (err) => {
-                console.error("MQTT error:", err);
-                setStatus("Error", "status-error");
+                console.error("MQTT error", err);
+                statusSpan.textContent = "MQTT error: " + err.message;
+            });
+
+            client.on("close", () => {
+                statusSpan.textContent = "Disconnected";
             });
 
             client.on("message", (topic, message) => {
+                if (topic !== MQTT_TOPIC) return;
                 try {
-                    const payloadStr = message.toString();
-                    const data = JSON.parse(payloadStr);
-
-                    // Expected payload structure from ESP:
-                    // {
-                    //   "tempC": 26.7,
-                    //   "tempF": 80.06,
-                    //   "hum": 39.0,
-                    //   "ts": "2025-11-27T03:12:05Z"  // or epoch seconds/ms (optional)
-                    // }
+                    const data = JSON.parse(message.toString());
+                    if (typeof data.tempC === "undefined") return;
 
                     const tC = Number(data.tempC);
                     const tF = Number(data.tempF);
                     const h = Number(data.hum);
 
-                    if (isNaN(tC) || isNaN(tF) || isNaN(h)) {
-                        console.warn("Invalid numeric payload:", data);
-                        return;
-                    }
-
-                    let ts;
-                    if (data.ts !== undefined) {
-                        if (typeof data.ts === "number") {
-                            // If looks like epoch ms vs seconds
-                            ts = data.ts > 1e12 ? new Date(data.ts) : new Date(data.ts * 1000);
-                        } else {
-                            ts = new Date(data.ts);
-                        }
+                    let tsDate;
+                    if (typeof data.ts === "number") {
+                        // assume epoch seconds if small, ms if large
+                        tsDate = data.ts > 1e12 ? new Date(data.ts) : new Date(data.ts * 1000);
+                    } else if (typeof data.ts === "string") {
+                        tsDate = new Date(data.ts);
                     } else {
-                        ts = new Date(); // fallback to browser time
+                        tsDate = new Date();
                     }
 
-                    if (!(ts instanceof Date) || isNaN(ts.getTime())) {
-                        ts = new Date();
-                    }
-
-                    // Push sample into in-memory history
                     samples.push({
-                        time: ts,
+                        time: tsDate,
                         tempC: tC,
                         tempF: tF,
                         hum: h
                     });
 
-                    // Update current readings
+                    // Update current value display
                     if (currentTempUnit === "C") {
                         currentTempSpan.textContent = tC.toFixed(2);
                     } else {
@@ -555,30 +435,19 @@
                     }
                     currentHumSpan.textContent = h.toFixed(2);
 
-                    lastMsgTimeSpan.textContent = ts.toLocaleTimeString();
-
                     updateStatsAndCharts();
                 } catch (e) {
-                    console.error("Failed to handle MQTT message:", e, message.toString());
+                    console.error("Failed to parse MQTT message", e);
                 }
             });
+        }
 
-            // ================== EVENT HANDLERS ==================
-            btnC.addEventListener("click", () => setTempUnit("C"));
-            btnF.addEventListener("click", () => setTempUnit("F"));
-
-            spanButtons.forEach(btn => {
-                btn.addEventListener("click", () => {
-                    const key = btn.dataset.span;
-                    setSpan(key);
-                });
-            });
-
-            // ================== INIT ==================
-            setTempUnit("C");
-            setSpan("5m");
-        });
+        // Initialise
+        setTempUnit("C");
+        setSpan("5m");
+        connectMqtt();
     </script>
+
 </body>
 
 </html>
