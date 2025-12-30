@@ -57,7 +57,7 @@
 
         button {
             margin: 2px;
-            padding: 4px 8px;
+            padding: 6px 10px;
             border-radius: 4px;
             border: 1px solid #ccc;
             background: #eee;
@@ -101,28 +101,36 @@
     <div class="card">
         <h1>ESP8266 DHT11 Live Monitor</h1>
         <h2>Stats for selected time span</h2>
+
         <table>
             <thead>
                 <tr>
                     <th>Metric</th>
                     <th>Min</th>
+                    <th>Min time</th>
                     <th>Max</th>
+                    <th>Max time</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
                     <td>Temp (<span id="statsTempUnit">°C</span>)</td>
                     <td id="minTemp">--</td>
+                    <td id="minTempTime">--</td>
                     <td id="maxTemp">--</td>
+                    <td id="maxTempTime">--</td>
                 </tr>
                 <tr>
                     <td>Humidity (%)</td>
                     <td id="minHum">--</td>
+                    <td id="minHumTime">--</td>
                     <td id="maxHum">--</td>
+                    <td id="maxHumTime">--</td>
                 </tr>
             </tbody>
         </table>
-        <small id="statsInfo">No data yet.</small>
+
+        <small id="statsInfo">Loading history...</small>
     </div>
 
     <!-- CURRENT VALUES + CONTROLS -->
@@ -133,11 +141,12 @@
             </div>
             <div><strong>Humidity: </strong><span id="currentHum">--</span> %</div>
             <div><strong>Status: </strong><span id="status">Connecting...</span></div>
+
             <div><strong>Fan: </strong><span id="fanState">--</span> (last change: <span id="fanChanged">--</span>)
             </div>
             <div><strong>Light: </strong><span id="lightState">--</span> (last change: <span
-                    id="lightChanged">--</span>)</div>
-
+                    id="lightChanged">--</span>)
+            </div>
         </div>
 
         <div id="controls">
@@ -161,7 +170,7 @@
 
             <small>
                 Time span = now minus selected range.
-                Uses live samples from this session only.
+                History loads from <code>/history</code> on page load + live WebSocket samples.
             </small>
         </div>
     </div>
@@ -192,7 +201,7 @@
 
         let currentSpanKey = "5m";
         let currentTempUnit = "C";
-        const samples = []; // { time, tempC, tempF, hum }
+        const samples = []; // { time: Date, tempC, tempF, hum }
 
         const statusSpan = document.getElementById("status");
         const currentTempSpan = document.getElementById("currentTemp");
@@ -201,16 +210,21 @@
 
         const statsTempUnitSpan = document.getElementById("statsTempUnit");
         const minTempSpan = document.getElementById("minTemp");
+        const minTempTimeSpan = document.getElementById("minTempTime");
         const maxTempSpan = document.getElementById("maxTemp");
+        const maxTempTimeSpan = document.getElementById("maxTempTime");
+
         const minHumSpan = document.getElementById("minHum");
+        const minHumTimeSpan = document.getElementById("minHumTime");
         const maxHumSpan = document.getElementById("maxHum");
+        const maxHumTimeSpan = document.getElementById("maxHumTime");
+
         const statsInfoSpan = document.getElementById("statsInfo");
 
         const fanStateSpan = document.getElementById("fanState");
         const fanChangedSpan = document.getElementById("fanChanged");
         const lightStateSpan = document.getElementById("lightState");
         const lightChangedSpan = document.getElementById("lightChanged");
-
 
         const graphTempUnitSpan = document.getElementById("graphTempUnit");
 
@@ -221,6 +235,46 @@
         const tempCtx = document.getElementById("tempChart").getContext("2d");
         const humCtx = document.getElementById("humChart").getContext("2d");
 
+        function formatHMS(d) {
+            const h = d.getHours().toString().padStart(2, "0");
+            const m = d.getMinutes().toString().padStart(2, "0");
+            const s = d.getSeconds().toString().padStart(2, "0");
+            return `${h}:${m}:${s}`;
+        }
+
+        function pruneOldSamples() {
+            const now = new Date();
+            const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            for (let i = samples.length - 1; i >= 0; i--) {
+                if (samples[i].time < dayAgo) samples.splice(i, 1);
+            }
+        }
+
+        function getFilteredSamples() {
+            pruneOldSamples();
+            const now = new Date();
+            const spanMs = SPAN_OPTIONS[currentSpanKey] || SPAN_OPTIONS["5m"];
+            const cutoff = new Date(now.getTime() - spanMs);
+            return samples.filter(s => s.time >= cutoff);
+        }
+
+        function findMinMaxWithTime(arr, valueSelector) {
+            let minVal = Infinity, maxVal = -Infinity;
+            let minTime = null, maxTime = null;
+
+            for (const s of arr) {
+                const v = valueSelector(s);
+                if (!Number.isFinite(v)) continue;
+                if (v < minVal) { minVal = v; minTime = s.time; }
+                if (v > maxVal) { maxVal = v; maxTime = s.time; }
+            }
+
+            if (!Number.isFinite(minVal)) {
+                return { minVal: null, minTime: null, maxVal: null, maxTime: null };
+            }
+            return { minVal, minTime, maxVal, maxTime };
+        }
+
         const commonOptions = {
             animation: false,
             responsive: true,
@@ -229,56 +283,58 @@
                     title: { display: true, text: "Time" },
                     ticks: { maxTicksLimit: 10 }
                 },
-                y: {
-                    beginAtZero: false
-                }
+                y: { beginAtZero: false }
             },
-            plugins: {
-                legend: { display: false }
-            }
+            plugins: { legend: { display: false } }
         };
 
+        // ✅ Dots enabled: pointRadius > 0
         const tempChart = new Chart(tempCtx, {
             type: "line",
-            data: { labels: [], datasets: [{ label: "Temperature", data: [], borderWidth: 2, fill: false }] },
+            data: {
+                labels: [],
+                datasets: [{
+                    label: "Temperature",
+                    data: [],
+                    borderWidth: 2,
+                    fill: false,
+                    pointRadius: 3,
+                    pointHoverRadius: 5
+                }]
+            },
             options: commonOptions
         });
 
         const humChart = new Chart(humCtx, {
             type: "line",
-            data: { labels: [], datasets: [{ label: "Humidity", data: [], borderWidth: 2, fill: false }] },
+            data: {
+                labels: [],
+                datasets: [{
+                    label: "Humidity",
+                    data: [],
+                    borderWidth: 2,
+                    fill: false,
+                    pointRadius: 3,
+                    pointHoverRadius: 5
+                }]
+            },
             options: commonOptions
         });
-
-        function formatHM(d) {
-            const h = d.getHours().toString().padStart(2, "0");
-            const m = d.getMinutes().toString().padStart(2, "0");
-            return `${h}:${m}`;
-        }
-
-        function getFilteredSamples() {
-            const now = new Date();
-            const spanMs = SPAN_OPTIONS[currentSpanKey];
-            const cutoff = new Date(now.getTime() - spanMs);
-
-            const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-            for (let i = samples.length - 1; i >= 0; i--) {
-                if (samples[i].time < dayAgo) {
-                    samples.splice(i, 1);
-                }
-            }
-
-            return samples.filter(s => s.time >= cutoff);
-        }
 
         function updateStatsAndCharts() {
             const filtered = getFilteredSamples();
 
             if (filtered.length === 0) {
                 minTempSpan.textContent = "--";
+                minTempTimeSpan.textContent = "--";
                 maxTempSpan.textContent = "--";
+                maxTempTimeSpan.textContent = "--";
+
                 minHumSpan.textContent = "--";
+                minHumTimeSpan.textContent = "--";
                 maxHumSpan.textContent = "--";
+                maxHumTimeSpan.textContent = "--";
+
                 statsInfoSpan.textContent = "No data for selected span yet.";
 
                 tempChart.data.labels = [];
@@ -291,27 +347,30 @@
                 return;
             }
 
-            const temps = filtered.map(s => currentTempUnit === "C" ? s.tempC : s.tempF);
-            const hums = filtered.map(s => s.hum);
-
-            const minTemp = Math.min(...temps);
-            const maxTemp = Math.max(...temps);
-            const minHum = Math.min(...hums);
-            const maxHum = Math.max(...hums);
-
-            minTempSpan.textContent = minTemp.toFixed(2);
-            maxTempSpan.textContent = maxTemp.toFixed(2);
-            minHumSpan.textContent = minHum.toFixed(2);
-            maxHumSpan.textContent = maxHum.toFixed(2);
+            const tempSelector = (s) => currentTempUnit === "C" ? s.tempC : s.tempF;
+            const tempMM = findMinMaxWithTime(filtered, tempSelector);
+            const humMM = findMinMaxWithTime(filtered, (s) => s.hum);
 
             statsTempUnitSpan.textContent = currentTempUnit === "C" ? "°C" : "°F";
 
+            minTempSpan.textContent = tempMM.minVal === null ? "--" : tempMM.minVal.toFixed(2);
+            maxTempSpan.textContent = tempMM.maxVal === null ? "--" : tempMM.maxVal.toFixed(2);
+            minTempTimeSpan.textContent = tempMM.minTime ? formatHMS(tempMM.minTime) : "--";
+            maxTempTimeSpan.textContent = tempMM.maxTime ? formatHMS(tempMM.maxTime) : "--";
+
+            minHumSpan.textContent = humMM.minVal === null ? "--" : humMM.minVal.toFixed(2);
+            maxHumSpan.textContent = humMM.maxVal === null ? "--" : humMM.maxVal.toFixed(2);
+            minHumTimeSpan.textContent = humMM.minTime ? formatHMS(humMM.minTime) : "--";
+            maxHumTimeSpan.textContent = humMM.maxTime ? formatHMS(humMM.maxTime) : "--";
+
             const now = new Date();
             const earliest = filtered[0].time;
-            const spanLabel = `${formatHM(earliest)} → ${formatHM(now)}`;
-            statsInfoSpan.textContent = `Showing ${filtered.length} samples from ${spanLabel}.`;
+            statsInfoSpan.textContent = `Showing ${filtered.length} samples from ${formatHMS(earliest)} → ${formatHMS(now)}.`;
 
-            const labels = filtered.map(s => formatHM(s.time));
+            const labels = filtered.map(s => formatHMS(s.time));
+            const temps = filtered.map(s => tempSelector(s));
+            const hums = filtered.map(s => s.hum);
+
             tempChart.data.labels = labels;
             tempChart.data.datasets[0].data = temps;
             tempChart.update("none");
@@ -333,26 +392,88 @@
                 btnF.classList.add("active");
                 btnC.classList.remove("active");
             }
-
             updateStatsAndCharts();
         }
 
         function setSpan(key) {
             if (!SPAN_OPTIONS[key]) return;
             currentSpanKey = key;
-            spanButtons.forEach(btn => {
-                if (btn.dataset.span === key) btn.classList.add("active");
-                else btn.classList.remove("active");
-            });
+            spanButtons.forEach(btn => btn.classList.toggle("active", btn.dataset.span === key));
             updateStatsAndCharts();
         }
 
         btnC.addEventListener("click", () => setTempUnit("C"));
         btnF.addEventListener("click", () => setTempUnit("F"));
+        spanButtons.forEach(btn => btn.addEventListener("click", () => setSpan(btn.dataset.span)));
 
-        spanButtons.forEach(btn => {
-            btn.addEventListener("click", () => setSpan(btn.dataset.span));
-        });
+        // -------- HISTORY LOAD (/history) --------
+        function parseHistoryRowToSample(row, fallbackBaseTime) {
+            // row: {date, time, tempC, tempF, hum, ...}
+            const d = String(row.date || "");
+            const t = String(row.time || "");
+
+            // If offline markers, build synthetic time sequence
+            if (d === "0000-00-00" || t === "00:00:00" || !d || !t) {
+                // Use incremental fallback time to preserve ordering
+                return {
+                    time: new Date(fallbackBaseTime),
+                    tempC: Number(row.tempC),
+                    tempF: Number(row.tempF),
+                    hum: Number(row.hum)
+                };
+            }
+
+            // Parse "YYYY-MM-DD" and "HH:MM:SS" into a local Date
+            const year = Number(d.substring(0, 4));
+            const mon = Number(d.substring(5, 7)) - 1;
+            const day = Number(d.substring(8, 10));
+
+            const hh = Number(t.substring(0, 2));
+            const mm = Number(t.substring(3, 5));
+            const ss = Number(t.substring(6, 8));
+
+            const dt = new Date(year, mon, day, hh, mm, ss);
+
+            return {
+                time: dt,
+                tempC: Number(row.tempC),
+                tempF: Number(row.tempF),
+                hum: Number(row.hum)
+            };
+        }
+
+        async function loadHistory() {
+            try {
+                statsInfoSpan.textContent = "Loading history from /history...";
+                const res = await fetch("/history", { cache: "no-store" });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                const arr = await res.json();
+                if (!Array.isArray(arr)) throw new Error("History is not an array");
+
+                // Clear session samples and rebuild from history
+                samples.length = 0;
+
+                // For offline rows, we create a synthetic timeline in the last N minutes/hours
+                // based on number of points returned (assumes stable dataRate spacing).
+                // We'll just step forward 5 seconds by default.
+                let synthetic = Date.now() - (arr.length * 5000);
+
+                for (const row of arr) {
+                    const s = parseHistoryRowToSample(row, synthetic);
+                    samples.push(s);
+                    synthetic += 5000; // best-effort for offline markers
+                }
+
+                // Sort by time just in case
+                samples.sort((a, b) => a.time - b.time);
+
+                statsInfoSpan.textContent = `Loaded ${samples.length} history samples.`;
+                updateStatsAndCharts();
+            } catch (e) {
+                console.error("History load failed:", e);
+                statsInfoSpan.textContent = "Failed to load /history (check console).";
+            }
+        }
 
         // -------- WebSocket --------
         let ws;
@@ -363,18 +484,14 @@
 
             ws = new WebSocket(wsUrl);
 
-            ws.onopen = () => {
-                statusSpan.textContent = "Connected";
-            };
+            ws.onopen = () => { statusSpan.textContent = "Connected"; };
 
             ws.onclose = () => {
                 statusSpan.textContent = "Disconnected, retrying...";
                 setTimeout(connectWebSocket, 3000);
             };
 
-            ws.onerror = () => {
-                statusSpan.textContent = "Error";
-            };
+            ws.onerror = () => { statusSpan.textContent = "Error"; };
 
             ws.onmessage = (event) => {
                 try {
@@ -388,25 +505,16 @@
                     const now = new Date();
                     samples.push({ time: now, tempC: tC, tempF: tF, hum: h });
 
-                    if (currentTempUnit === "C") currentTempSpan.textContent = tC.toFixed(2);
-                    else currentTempSpan.textContent = tF.toFixed(2);
+                    // Current values
+                    currentTempSpan.textContent = (currentTempUnit === "C" ? tC : tF).toFixed(2);
                     currentHumSpan.textContent = h.toFixed(2);
 
-                    // Fan / Light state & times
-                    if (typeof data.fanOn !== "undefined") {
-                        fanStateSpan.textContent = data.fanOn ? "ON" : "OFF";
-                    }
-                    if (typeof data.fanChanged === "string") {
-                        fanChangedSpan.textContent = data.fanChanged;
-                    }
+                    // Fan / Light
+                    if (typeof data.fanOn !== "undefined") fanStateSpan.textContent = data.fanOn ? "ON" : "OFF";
+                    if (typeof data.fanChanged === "string") fanChangedSpan.textContent = data.fanChanged;
 
-                    if (typeof data.lightOn !== "undefined") {
-                        lightStateSpan.textContent = data.lightOn ? "ON" : "OFF";
-                    }
-                    if (typeof data.lightChanged === "string") {
-                        lightChangedSpan.textContent = data.lightChanged;
-                    }
-
+                    if (typeof data.lightOn !== "undefined") lightStateSpan.textContent = data.lightOn ? "ON" : "OFF";
+                    if (typeof data.lightChanged === "string") lightChangedSpan.textContent = data.lightChanged;
 
                     updateStatsAndCharts();
                 } catch (e) {
@@ -415,9 +523,12 @@
             };
         }
 
+        // Init
         setTempUnit("C");
         setSpan("5m");
-        connectWebSocket();
+
+        // Load history first, then connect WS
+        loadHistory().finally(() => connectWebSocket());
     </script>
 </body>
 
