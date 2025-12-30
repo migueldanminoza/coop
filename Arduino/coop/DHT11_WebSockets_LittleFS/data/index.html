@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>ESP8266 DHT11 Live Monitor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
+            background: #f7f7f7;
+        }
+
+        .card {
+            display: inline-block;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            background: #fff;
+            max-width: 900px;
+            width: 100%;
+            margin-bottom: 20px;
+            text-align: left;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        h2 {
+            margin: 10px 0;
+            font-size: 1.1em;
+            text-align: left;
+        }
+
+        canvas {
+            max-width: 100%;
+            height: 260px;
+        }
+
+        #values,
+        #controls {
+            font-size: 0.95em;
+            margin-bottom: 10px;
+        }
+
+        #values div {
+            margin-bottom: 4px;
+        }
+
+        .btn-group {
+            margin: 8px 0;
+        }
+
+        button {
+            margin: 2px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            background: #eee;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+
+        button.active {
+            background: #4285f4;
+            color: #fff;
+            border-color: #3367d6;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 6px;
+            text-align: center;
+        }
+
+        th {
+            background: #f0f0f0;
+        }
+
+        small {
+            color: #666;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+    <!-- MIN–MAX STATS TABLE -->
+    <div class="card">
+        <h1>ESP8266 DHT11 Live Monitor</h1>
+        <h2>Stats for selected time span</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th>Min</th>
+                    <th>Max</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Temp (<span id="statsTempUnit">°C</span>)</td>
+                    <td id="minTemp">--</td>
+                    <td id="maxTemp">--</td>
+                </tr>
+                <tr>
+                    <td>Humidity (%)</td>
+                    <td id="minHum">--</td>
+                    <td id="maxHum">--</td>
+                </tr>
+            </tbody>
+        </table>
+        <small id="statsInfo">No data yet.</small>
+    </div>
+
+    <!-- CURRENT VALUES + CONTROLS -->
+    <div class="card">
+        <h2>Current values & controls</h2>
+        <div id="values">
+            <div><strong>Temperature: </strong><span id="currentTemp">--</span> <span id="currentTempUnit">°C</span>
+            </div>
+            <div><strong>Humidity: </strong><span id="currentHum">--</span> %</div>
+            <div><strong>Status: </strong><span id="status">Connecting...</span></div>
+            <div><strong>Fan: </strong><span id="fanState">--</span> (last change: <span id="fanChanged">--</span>)
+            </div>
+            <div><strong>Light: </strong><span id="lightState">--</span> (last change: <span
+                    id="lightChanged">--</span>)</div>
+
+        </div>
+
+        <div id="controls">
+            <div class="btn-group">
+                <strong>Temperature unit:</strong>
+                <button id="btnC" class="active">°C</button>
+                <button id="btnF">°F</button>
+            </div>
+
+            <div class="btn-group">
+                <strong>Time span:</strong><br>
+                <button data-span="5m" class="span-btn active">5m</button>
+                <button data-span="15m" class="span-btn">15m</button>
+                <button data-span="30m" class="span-btn">30m</button>
+                <button data-span="1h" class="span-btn">1h</button>
+                <button data-span="3h" class="span-btn">3h</button>
+                <button data-span="6h" class="span-btn">6h</button>
+                <button data-span="12h" class="span-btn">12h</button>
+                <button data-span="24h" class="span-btn">24h</button>
+            </div>
+
+            <small>
+                Time span = now minus selected range.
+                Uses live samples from this session only.
+            </small>
+        </div>
+    </div>
+
+    <!-- TEMPERATURE GRAPH -->
+    <div class="card">
+        <h2>Temperature (<span id="graphTempUnit">°C</span>)</h2>
+        <canvas id="tempChart"></canvas>
+    </div>
+
+    <!-- HUMIDITY GRAPH -->
+    <div class="card">
+        <h2>Humidity (%)</h2>
+        <canvas id="humChart"></canvas>
+    </div>
+
+    <script>
+        const SPAN_OPTIONS = {
+            "5m": 5 * 60 * 1000,
+            "15m": 15 * 60 * 1000,
+            "30m": 30 * 60 * 1000,
+            "1h": 1 * 60 * 60 * 1000,
+            "3h": 3 * 60 * 60 * 1000,
+            "6h": 6 * 60 * 60 * 1000,
+            "12h": 12 * 60 * 60 * 1000,
+            "24h": 24 * 60 * 60 * 1000
+        };
+
+        let currentSpanKey = "5m";
+        let currentTempUnit = "C";
+        const samples = []; // { time, tempC, tempF, hum }
+
+        const statusSpan = document.getElementById("status");
+        const currentTempSpan = document.getElementById("currentTemp");
+        const currentTempUnitSpan = document.getElementById("currentTempUnit");
+        const currentHumSpan = document.getElementById("currentHum");
+
+        const statsTempUnitSpan = document.getElementById("statsTempUnit");
+        const minTempSpan = document.getElementById("minTemp");
+        const maxTempSpan = document.getElementById("maxTemp");
+        const minHumSpan = document.getElementById("minHum");
+        const maxHumSpan = document.getElementById("maxHum");
+        const statsInfoSpan = document.getElementById("statsInfo");
+
+        const fanStateSpan = document.getElementById("fanState");
+        const fanChangedSpan = document.getElementById("fanChanged");
+        const lightStateSpan = document.getElementById("lightState");
+        const lightChangedSpan = document.getElementById("lightChanged");
+
+
+        const graphTempUnitSpan = document.getElementById("graphTempUnit");
+
+        const btnC = document.getElementById("btnC");
+        const btnF = document.getElementById("btnF");
+        const spanButtons = document.querySelectorAll(".span-btn");
+
+        const tempCtx = document.getElementById("tempChart").getContext("2d");
+        const humCtx = document.getElementById("humChart").getContext("2d");
+
+        const commonOptions = {
+            animation: false,
+            responsive: true,
+            scales: {
+                x: {
+                    title: { display: true, text: "Time" },
+                    ticks: { maxTicksLimit: 10 }
+                },
+                y: {
+                    beginAtZero: false
+                }
+            },
+            plugins: {
+                legend: { display: false }
+            }
+        };
+
+        const tempChart = new Chart(tempCtx, {
+            type: "line",
+            data: { labels: [], datasets: [{ label: "Temperature", data: [], borderWidth: 2, fill: false }] },
+            options: commonOptions
+        });
+
+        const humChart = new Chart(humCtx, {
+            type: "line",
+            data: { labels: [], datasets: [{ label: "Humidity", data: [], borderWidth: 2, fill: false }] },
+            options: commonOptions
+        });
+
+        function formatHM(d) {
+            const h = d.getHours().toString().padStart(2, "0");
+            const m = d.getMinutes().toString().padStart(2, "0");
+            return `${h}:${m}`;
+        }
+
+        function getFilteredSamples() {
+            const now = new Date();
+            const spanMs = SPAN_OPTIONS[currentSpanKey];
+            const cutoff = new Date(now.getTime() - spanMs);
+
+            const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            for (let i = samples.length - 1; i >= 0; i--) {
+                if (samples[i].time < dayAgo) {
+                    samples.splice(i, 1);
+                }
+            }
+
+            return samples.filter(s => s.time >= cutoff);
+        }
+
+        function updateStatsAndCharts() {
+            const filtered = getFilteredSamples();
+
+            if (filtered.length === 0) {
+                minTempSpan.textContent = "--";
+                maxTempSpan.textContent = "--";
+                minHumSpan.textContent = "--";
+                maxHumSpan.textContent = "--";
+                statsInfoSpan.textContent = "No data for selected span yet.";
+
+                tempChart.data.labels = [];
+                tempChart.data.datasets[0].data = [];
+                tempChart.update("none");
+
+                humChart.data.labels = [];
+                humChart.data.datasets[0].data = [];
+                humChart.update("none");
+                return;
+            }
+
+            const temps = filtered.map(s => currentTempUnit === "C" ? s.tempC : s.tempF);
+            const hums = filtered.map(s => s.hum);
+
+            const minTemp = Math.min(...temps);
+            const maxTemp = Math.max(...temps);
+            const minHum = Math.min(...hums);
+            const maxHum = Math.max(...hums);
+
+            minTempSpan.textContent = minTemp.toFixed(2);
+            maxTempSpan.textContent = maxTemp.toFixed(2);
+            minHumSpan.textContent = minHum.toFixed(2);
+            maxHumSpan.textContent = maxHum.toFixed(2);
+
+            statsTempUnitSpan.textContent = currentTempUnit === "C" ? "°C" : "°F";
+
+            const now = new Date();
+            const earliest = filtered[0].time;
+            const spanLabel = `${formatHM(earliest)} → ${formatHM(now)}`;
+            statsInfoSpan.textContent = `Showing ${filtered.length} samples from ${spanLabel}.`;
+
+            const labels = filtered.map(s => formatHM(s.time));
+            tempChart.data.labels = labels;
+            tempChart.data.datasets[0].data = temps;
+            tempChart.update("none");
+
+            humChart.data.labels = labels;
+            humChart.data.datasets[0].data = hums;
+            humChart.update("none");
+        }
+
+        function setTempUnit(unit) {
+            currentTempUnit = unit;
+            graphTempUnitSpan.textContent = unit === "C" ? "°C" : "°F";
+            currentTempUnitSpan.textContent = unit === "C" ? "°C" : "°F";
+
+            if (unit === "C") {
+                btnC.classList.add("active");
+                btnF.classList.remove("active");
+            } else {
+                btnF.classList.add("active");
+                btnC.classList.remove("active");
+            }
+
+            updateStatsAndCharts();
+        }
+
+        function setSpan(key) {
+            if (!SPAN_OPTIONS[key]) return;
+            currentSpanKey = key;
+            spanButtons.forEach(btn => {
+                if (btn.dataset.span === key) btn.classList.add("active");
+                else btn.classList.remove("active");
+            });
+            updateStatsAndCharts();
+        }
+
+        btnC.addEventListener("click", () => setTempUnit("C"));
+        btnF.addEventListener("click", () => setTempUnit("F"));
+
+        spanButtons.forEach(btn => {
+            btn.addEventListener("click", () => setSpan(btn.dataset.span));
+        });
+
+        // -------- WebSocket --------
+        let ws;
+
+        function connectWebSocket() {
+            const wsUrl = "ws://" + window.location.hostname + ":81/";
+            statusSpan.textContent = "Connecting to " + wsUrl + " ...";
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                statusSpan.textContent = "Connected";
+            };
+
+            ws.onclose = () => {
+                statusSpan.textContent = "Disconnected, retrying...";
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => {
+                statusSpan.textContent = "Error";
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (typeof data.tempC === "undefined") return;
+
+                    const tC = Number(data.tempC);
+                    const tF = Number(data.tempF);
+                    const h = Number(data.hum);
+
+                    const now = new Date();
+                    samples.push({ time: now, tempC: tC, tempF: tF, hum: h });
+
+                    if (currentTempUnit === "C") currentTempSpan.textContent = tC.toFixed(2);
+                    else currentTempSpan.textContent = tF.toFixed(2);
+                    currentHumSpan.textContent = h.toFixed(2);
+
+                    // Fan / Light state & times
+                    if (typeof data.fanOn !== "undefined") {
+                        fanStateSpan.textContent = data.fanOn ? "ON" : "OFF";
+                    }
+                    if (typeof data.fanChanged === "string") {
+                        fanChangedSpan.textContent = data.fanChanged;
+                    }
+
+                    if (typeof data.lightOn !== "undefined") {
+                        lightStateSpan.textContent = data.lightOn ? "ON" : "OFF";
+                    }
+                    if (typeof data.lightChanged === "string") {
+                        lightChangedSpan.textContent = data.lightChanged;
+                    }
+
+
+                    updateStatsAndCharts();
+                } catch (e) {
+                    console.error("Failed to parse WS message:", event.data, e);
+                }
+            };
+        }
+
+        setTempUnit("C");
+        setSpan("5m");
+        connectWebSocket();
+    </script>
+</body>
+
+</html>
