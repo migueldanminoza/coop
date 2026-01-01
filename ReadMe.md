@@ -18,12 +18,13 @@ Search the following to configure:
 6. float FAN_ON_TEMP_C or float FAN_OFF_TEMP_C > Fan ON and OFF temps
 7. float LIGHT_ON_TEMP_C or float LIGHT_OFF_TEMP_C > Light ON and OFF temps
 8. const unsigned long LIGHT_ON_DURATION_MS > light ON timer (currently: 3600000UL for 1 hour)
-9. const unsigned long DATA_RATE_SECONDS > rate of posting new data (currently: 60, must be low as ESP has low memory)
+9. const unsigned long DATA_RATE_SECONDS > rate of posting new data in seconds (currently: 60, must be low as ESP has low memory)
 
 To upload Sketch:
 1. Sketch > Upload
 Note: Ensure to close all open bottom tabs (ie. LittleFS, Serial Monitor etc)
 
+![alt text](esp8266-nodemcu-pinout.jpg)
 
 
 Local index.html

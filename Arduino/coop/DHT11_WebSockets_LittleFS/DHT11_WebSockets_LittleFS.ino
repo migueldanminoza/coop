@@ -46,7 +46,7 @@ const unsigned long LIGHT_ON_DURATION_MS = 3600000UL; // 1 hour
 
 // -------------------- DATA RATE --------------------
 // Single knob to control SAMPLE + LOG + PUBLISH rate
-const unsigned long DATA_RATE_SECONDS = 15;               // seconds
+const unsigned long DATA_RATE_SECONDS = 60;               // seconds
 const unsigned long DATA_RATE_MS      = DATA_RATE_SECONDS * 1000UL;
 const unsigned long SAMPLES_PER_DAY   = 86400UL / DATA_RATE_SECONDS;
 
